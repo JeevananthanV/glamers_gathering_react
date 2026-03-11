@@ -1068,7 +1068,8 @@
 
         .gg-admin-bar-fill {
             width: 100%;
-            background: linear-gradient(180deg, var(--gg-accent), var(--gg-primary-dark));
+            background: var(--gg-primary-dark);
+            /* linear-gradient(90deg, var(--gg-primary-dark), var(--gg-primary)); */
             border-radius: 6px 6px 4px 4px;
             display: flex;
             align-items: flex-end;

@@ -3,7 +3,6 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "predev": "powershell -Command \"Get-NetTCPConnection -LocalPort 5002 -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }\"",
     "dev": "nodemon server.js",
     "start": "node server.js"
   },
