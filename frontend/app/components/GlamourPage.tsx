@@ -1,5 +1,4 @@
 import { useEffect, useState, type FormEvent, type MouseEvent as ReactMouseEvent } from "react";
-import QRCode from "qrcode";
 import { API_BASE } from "./adminClient";
 
 const EVENT_DATE_ISO = "2026-05-02T09:00:00";
