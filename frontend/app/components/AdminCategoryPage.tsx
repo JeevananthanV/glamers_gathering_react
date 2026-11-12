@@ -95,8 +95,10 @@ export function AdminCategoryPage({
           label="Filled vs Target"
           value={data.total}
           total={data.target || data.total}
-        />
-        <BarChart label="Last 14 Days" data={dailyData} />
+          />
+          
+          {/* graph to show daily submissions for last 14 days */}
+          <BarChart label="Last 14 Days" data={dailyData} />
       </section>
 
       <section className="gg-admin-search">

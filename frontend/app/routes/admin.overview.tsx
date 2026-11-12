@@ -83,6 +83,14 @@ export default function AdminOverview() {
     <AdminShell title="Overview">
       <section className="gg-admin-grid">
         <StatCard label="Total Submissions" value={data.total} />
+        <StatCard
+          label="Total Tickets"
+          value={data.counts.audience || 0}
+          sublabel={`${Math.max(
+            0,
+            (data.counts.audience || 0) - data.entryTickets
+          )} pending`}
+        />
         <StatCard label="Entry Check-ins" value={data.entryCount} />
         <StatCard label="Entry Tickets" value={data.entryTickets} />
         {Object.keys(data.counts).map((key) => (

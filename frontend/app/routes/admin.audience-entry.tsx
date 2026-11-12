@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router";
 import {
   clearToken,
@@ -19,8 +19,9 @@ type EntryRow = {
 
 type EntryResponse = {
   ok: boolean;
-  status: "checked-in" | "already";
-  entry: EntryRow;
+  status: "checked-in" | "already" | "invalid";
+  message?: string;
+  entry?: EntryRow;
 };
 
 type EntriesListResponse = {
@@ -51,9 +52,13 @@ export default function AdminAudienceEntry() {
   const navigate = useNavigate();
   const [scanValue, setScanValue] = useState("");
   const [status, setStatus] = useState<string>("");
+  const [statusKind, setStatusKind] = useState<
+    "success" | "warning" | "error" | ""
+  >("");
   const [error, setError] = useState("");
   const [query, setQuery] = useState("");
   const [rows, setRows] = useState<EntryRow[]>([]);
+  const scanInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     const token = getToken();
@@ -61,6 +66,7 @@ export default function AdminAudienceEntry() {
       navigate("/admin/login");
       return;
     }
+    scanInputRef.current?.focus();
   }, [navigate]);
 
   const loadEntries = useMemo(() => {
@@ -94,38 +100,55 @@ export default function AdminAudienceEntry() {
     if (!code) {
       setStatus("");
       setError("Invalid QR data");
+      setStatusKind("error");
       return;
     }
 
     setError("");
+    setStatus("");
+    setStatusKind("");
+
     const payload = await fetchJson<EntryResponse>(
-      "/api/admin/audience/entry",
+      "/api/checkin",
       {
         method: "POST",
         body: JSON.stringify({ code }),
       }
     );
 
-    const statusMessage =
-      payload.status === "already"
-        ? `Already checked in: ${payload.entry.full_name}`
-        : `Checked in: ${payload.entry.full_name}`;
+    if (!payload.ok || payload.status === "invalid") {
+      setError(payload.message || "Invalid Ticket");
+      setStatusKind("error");
+      setScanValue("");
+      scanInputRef.current?.focus();
+      return;
+    }
 
-    setStatus(statusMessage);
+    const name = payload.entry?.full_name || "";
+    if (payload.status === "already") {
+      setStatus(payload.message || `Already Checked In${name ? `: ${name}` : ""}`);
+      setStatusKind("warning");
+    } else {
+      setStatus(payload.message || `Check-in Success${name ? `: ${name}` : ""}`);
+      setStatusKind("success");
+    }
     setScanValue("");
     await loadEntries(query);
+    scanInputRef.current?.focus();
   }
 
   return (
     <AdminShell title="Audience Entry">
       <section className="gg-admin-entry">
         <div className="gg-admin-entry-card">
-          <h3>Scan Ticket</h3>
+          <h3>Scan QR → Auto Check-in</h3>
           <p>Focus the input and scan the QR code. It will auto-submit on Enter.</p>
           <input
+            ref={scanInputRef}
             type="text"
             value={scanValue}
             onChange={(e) => setScanValue(e.target.value)}
+            onBlur={() => scanInputRef.current?.focus()}
             onKeyDown={(e) => {
               if (e.key === "Enter") {
                 e.preventDefault();
@@ -156,8 +179,18 @@ export default function AdminAudienceEntry() {
           >
             Check In
           </button>
-          {status ? <div className="gg-admin-entry-status">{status}</div> : null}
-          {error ? <div className="gg-admin-error">{error}</div> : null}
+          {status ? (
+            <div
+              className={`gg-admin-entry-status gg-admin-entry-status--${statusKind || "success"}`}
+            >
+              {status}
+            </div>
+          ) : null}
+          {error ? (
+            <div className="gg-admin-entry-status gg-admin-entry-status--error">
+              {error}
+            </div>
+          ) : null}
         </div>
 
         <div className="gg-admin-entry-card">

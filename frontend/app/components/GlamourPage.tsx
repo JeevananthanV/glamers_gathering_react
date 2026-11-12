@@ -1,8 +1,8 @@
 import { useEffect, useState, type FormEvent, type MouseEvent as ReactMouseEvent } from "react";
 import QRCode from "qrcode";
+import { API_BASE } from "./adminClient";
 
-const EVENT_DATE_ISO = "2026-04-02T09:00:00";
-const API_BASE = import.meta.env.VITE_API_URL ?? "http://localhost:5000";
+const EVENT_DATE_ISO = "2026-05-02T09:00:00";
 const DEFAULT_REMAINING = {
   audience: 250,
   models: 60,
@@ -386,99 +386,30 @@ function showToast(message: string) {
 }
 
 async function downloadAudienceTicket(ticket: AudienceTicket) {
-  const canvas = document.createElement("canvas");
-  const width = 1200;
-  const height = 700;
-  canvas.width = width;
-  canvas.height = height;
+  const safeName = ticket.fullName
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  const safeCode = ticket.code.replace(/[^a-z0-9-_]+/gi, "");
+  const fileBase = [safeName || "guest", safeCode].filter(Boolean).join("-");
+  const ticketUrl = `${API_BASE}/api/tickets/${encodeURIComponent(ticket.code)}.png`;
 
-  const ctx = canvas.getContext("2d");
-  if (!ctx) return;
-
-  const gradient = ctx.createLinearGradient(0, 0, width, height);
-  gradient.addColorStop(0, "#501122");
-  gradient.addColorStop(0.5, "#0e2f2c");
-  gradient.addColorStop(1, "#0a1614");
-  ctx.fillStyle = gradient;
-  ctx.fillRect(0, 0, width, height);
-
-  ctx.fillStyle = "rgba(255, 255, 255, 0.08)";
-  ctx.fillRect(40, 40, width - 80, height - 80);
-
-  ctx.strokeStyle = "rgba(255, 255, 255, 0.35)";
-  ctx.lineWidth = 2;
-  ctx.strokeRect(40, 40, width - 80, height - 80);
-
-  ctx.fillStyle = "#fff3e5";
-  ctx.font = "600 42px 'Jost', 'Segoe UI', sans-serif";
-  ctx.fillText("Glamour Gatherings", 90, 120);
-
-  ctx.font = "20px 'Jost', 'Segoe UI', sans-serif";
-  ctx.fillStyle = "rgba(255, 255, 255, 0.8)";
-  ctx.fillText("Audience Entry Ticket", 92, 155);
-
-  ctx.fillStyle = "#ffffff";
-  ctx.font = "28px 'Jost', 'Segoe UI', sans-serif";
-  ctx.fillText(`Name: ${ticket.fullName}`, 90, 230);
-  ctx.fillText(`Tickets: ${ticket.tickets}`, 90, 275);
-
-  const date = new Date(ticket.createdAt);
-  const dateText = Number.isNaN(date.getTime())
-    ? ticket.createdAt
-    : date.toLocaleString();
-  ctx.fillText(`Booked At: ${dateText}`, 90, 320);
-
-  ctx.font = "22px 'Jost', 'Segoe UI', sans-serif";
-  ctx.fillStyle = "rgba(255, 255, 255, 0.9)";
-  ctx.fillText("Event Date: 02 Apr 2026", 90, 380);
-  ctx.fillText("Venue: Salem, Tamil Nadu", 90, 415);
-
-  const qrPayload = JSON.stringify({
-    code: ticket.code,
-    name: ticket.fullName,
-    tickets: ticket.tickets,
-    bookedAt: ticket.createdAt,
-  });
-  let qrUrl = "";
   try {
-    qrUrl = await QRCode.toDataURL(qrPayload, {
-      width: 260,
-      margin: 1,
-      errorCorrectionLevel: "M",
-      color: { dark: "#0b1c19", light: "#ffffff" },
-    });
+    const res = await fetch(ticketUrl, { method: "GET" });
+    if (!res.ok) throw new Error("Failed to download ticket");
+    const blob = await res.blob();
+    const link = document.createElement("a");
+    const objectUrl = URL.createObjectURL(blob);
+    link.href = objectUrl;
+    link.download = `GG-Ticket-${fileBase}.png`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(objectUrl);
   } catch {
-    qrUrl = "";
+    showToast("Failed to download ticket");
   }
-
-  const qrX = width - 360;
-  const qrY = 190;
-  if (qrUrl) {
-    const qrImg = new Image();
-    qrImg.src = qrUrl;
-    await new Promise((resolve) => {
-      qrImg.onload = resolve;
-      qrImg.onerror = resolve;
-    });
-    ctx.fillStyle = "#ffffff";
-    ctx.fillRect(qrX - 10, qrY - 10, 280, 280);
-    ctx.drawImage(qrImg, qrX, qrY, 260, 260);
-  }
-
-  ctx.fillStyle = "#fff3e5";
-  ctx.font = "18px 'Jost', 'Segoe UI', sans-serif";
-  ctx.textAlign = "center";
-  ctx.fillText(`ID: ${ticket.code}`, qrX + 120, qrY + 300);
-  ctx.fillText(ticket.fullName, qrX + 120, qrY + 330);
-  ctx.textAlign = "left";
-
-  const dataUrl = canvas.toDataURL("image/png");
-  const link = document.createElement("a");
-  link.href = dataUrl;
-  link.download = `GG-Ticket-${ticket.code}.png`;
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
 }
 
 export default function GlamourPage() {
@@ -587,7 +518,7 @@ function Preloader() {
   return (
     <div id="gg-preloader" role="status" aria-label="Loading Glamour Gatherings">
       <div className="gg-loader-logo">Glamour Gatherings</div>
-      <div className="gg-loader-sub">Salem - April 2026</div>
+      <div className="gg-loader-sub">Salem - May 2026</div>
       <div className="gg-loader-bar" aria-hidden="true"></div>
     </div>
   );
@@ -650,16 +581,13 @@ function HeroSlider() {
   return (
     <header id="home" className="gg-hero-slider" aria-label="Event hero banner">
       <div
-        className="gg-slide active"
-        style={{
-          backgroundImage: "url('/assets/images/img/hero/banner.png')",
-        }}
+        className="gg-slide gg-slide-hero-main active"
         role="img"
         aria-label="Glamour Gatherings event banner"
       >
         <div className="gg-slide-overlay" aria-hidden="true"></div>
         <div className="gg-slide-content">
-          <span className="gg-hero-eyebrow">Salem, Tamil Nadu - April 2026</span>
+          <span className="gg-hero-eyebrow">Salem, Tamil Nadu - May 2026</span>
           <h1 className="gg-hero-title">Welcome to Glamour Gatherings</h1>
           <p className="gg-hero-tagline">
             Your exclusive sanctuary for sustainable fashion, elegance, and
@@ -668,7 +596,7 @@ function HeroSlider() {
           <div className="gg-event-meta-box" role="list" aria-label="Event key details">
             <div className="gg-meta-item" role="listitem">
               <h3>02</h3>
-              <p>Apr 2026</p>
+              <p>May 2026</p>
             </div>
             <div className="gg-meta-item" role="listitem">
               <h3>Salem</h3>
@@ -679,14 +607,7 @@ function HeroSlider() {
               <p>Full Event</p>
             </div>
           </div>
-          <div
-            style={{
-              display: "flex",
-              gap: "1rem",
-              justifyContent: "center",
-              flexWrap: "wrap",
-            }}
-          >
+          <div className="gg-hero-actions">
             <a href="#participate" className="gg-btn">
               Book Tickets
             </a>
@@ -698,10 +619,7 @@ function HeroSlider() {
       </div>
 
       <div
-        className="gg-slide"
-        style={{
-          backgroundImage: "url('/assets/images/img/hero/glamour-hero.jpg')",
-        }}
+        className="gg-slide gg-slide-hero-countdown"
         role="img"
         aria-label="Countdown to event"
       >
@@ -1049,7 +967,7 @@ function ScheduleSection() {
     <section id="schedule" className="gg-section-padding gg-schedule" aria-labelledby="schedule-heading">
       <div className="gg-container">
         <div className="gg-text-center gg-reveal">
-          <span className="gg-section-label">Event Day - 2 April 2026</span>
+          <span className="gg-section-label">Event Day - 2 May 2026</span>
           <h2 id="schedule-heading">Event Schedule</h2>
           <div className="gg-section-divider" aria-hidden="true"></div>
           <p style={{ color: "var(--gg-accent)", marginTop: "0.75rem", fontSize: "0.9rem" }}>
@@ -1363,7 +1281,7 @@ function Footer({
                 <a href="tel:+919876543210">+91 98765 43210</a>
               </li>
               <li>Salem, Tamil Nadu, India</li>
-              <li>2 April 2026</li>
+              <li>2 May 2026</li>
             </ul>
           </div>
         </div>
