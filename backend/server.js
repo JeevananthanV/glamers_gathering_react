@@ -28,7 +28,8 @@ const ADMIN_USERNAME = process.env.ADMIN_USERNAME || "admin";
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "Admin@123";
 const JWT_SECRET = process.env.ADMIN_JWT_SECRET || "GkdsdnJsssm@232";
 const FRONTEND_ORIGIN =
-  process.env.FRONTEND_ORIGIN || "http://localhost:5175,http://localhost:5173";
+  process.env.FRONTEND_ORIGIN ||
+  "http://localhost:5174,http://localhost:5173,http://localhost:5175,http://localhost:3000,http://localhost:5176";
 const ALLOWED_ORIGINS = FRONTEND_ORIGIN.split(",")
   .map((origin) => origin.trim().replace(/^["']|["']$/g, ""))
   .filter(Boolean);
@@ -101,6 +102,9 @@ app.use(
       if (!origin) return callback(null, true);
       if (ALLOW_ALL_ORIGINS) return callback(null, true);
       if (ALLOWED_ORIGINS.includes(origin)) return callback(null, true);
+      if (/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) {
+        return callback(null, true);
+      }
       return callback(new Error("Not allowed by CORS"));
     },
     credentials: true,
@@ -121,13 +125,23 @@ function toInt(value) {
   return Math.trunc(num);
 }
 
-function requireAuth(req, res, next) {
+function extractToken(req) {
   const header = req.headers.authorization || "";
-  if (!header.startsWith("Bearer ")) {
+  if (header.startsWith("Bearer ")) {
+    return header.slice(7).trim();
+  }
+  if (typeof req.query?.token === "string" && req.query.token.trim()) {
+    return req.query.token.trim();
+  }
+  return null;
+}
+
+function requireAuth(req, res, next) {
+  const token = extractToken(req);
+  if (!token) {
     return res.status(401).json({ error: "Unauthorized" });
   }
 
-  const token = header.slice(7);
   try {
     const payload = jwt.verify(token, JWT_SECRET);
     req.user = payload;
@@ -135,6 +149,53 @@ function requireAuth(req, res, next) {
   } catch (err) {
     return res.status(401).json({ error: "Unauthorized" });
   }
+}
+
+// ==========================================
+// REAL-TIME EVENT STREAMING (SSE HUB)
+// ==========================================
+const publicSseClients = new Set();
+const adminSseClients = new Set();
+
+function sendSseMessage(res, eventName, data) {
+  try {
+    res.write(`event: ${eventName}\ndata: ${JSON.stringify(data)}\n\n`);
+  } catch (err) {
+    // client might have disconnected
+  }
+}
+
+function broadcastPublic(eventName, data) {
+  for (const client of publicSseClients) {
+    sendSseMessage(client, eventName, data);
+  }
+}
+
+function broadcastAdmin(eventName, data) {
+  for (const client of adminSseClients) {
+    sendSseMessage(client, eventName, data);
+  }
+}
+
+// Heartbeat every 25 seconds to keep HTTP connections alive through proxies
+const sseHeartbeat = setInterval(() => {
+  for (const client of publicSseClients) {
+    try {
+      client.write(": ping\n\n");
+    } catch {
+      publicSseClients.delete(client);
+    }
+  }
+  for (const client of adminSseClients) {
+    try {
+      client.write(": ping\n\n");
+    } catch {
+      adminSseClients.delete(client);
+    }
+  }
+}, 25000);
+if (typeof sseHeartbeat.unref === "function") {
+  sseHeartbeat.unref();
 }
 
 async function ensureAdminUser() {
@@ -248,6 +309,61 @@ async function getEntryStats(pool) {
   };
 }
 
+async function getRecentActivity(pool, limit = 25) {
+  try {
+    const [rows] = await pool.query(
+      `SELECT * FROM (
+        SELECT 'audience' AS category, id, full_name, tickets, contact_number, email, ticket_code, created_at AS timestamp, 'New Audience Booking' AS action_label
+        FROM audience_submissions
+        UNION ALL
+        SELECT 'models' AS category, id, full_name, 1 AS tickets, contact_number, email, NULL AS ticket_code, created_at AS timestamp, 'New Model Application' AS action_label
+        FROM model_submissions
+        UNION ALL
+        SELECT 'makeup-artists' AS category, id, full_name, 1 AS tickets, contact_number, email, NULL AS ticket_code, created_at AS timestamp, 'New Makeup Artist Application' AS action_label
+        FROM makeup_artist_submissions
+        UNION ALL
+        SELECT 'stall-owners' AS category, id, business_name AS full_name, 1 AS tickets, contact_number, email, NULL AS ticket_code, created_at AS timestamp, 'New Stall Application' AS action_label
+        FROM stall_submissions
+        UNION ALL
+        SELECT 'checkin' AS category, id, full_name, tickets, contact_number, email, ticket_code, scanned_at AS timestamp, 'Audience Gate Check-in' AS action_label
+        FROM audience_entries
+      ) AS unified_activity
+      ORDER BY timestamp DESC LIMIT ?`,
+      [limit]
+    );
+    return rows;
+  } catch (err) {
+    console.error("Failed to fetch activity", err);
+    return [];
+  }
+}
+
+async function broadcastStatsAndSlotUpdate(pool, recentAction = null) {
+  try {
+    const { counts, remaining, total } = await getCountsAndRemaining(pool);
+    const { entryCount, entryTickets } = await getEntryStats(pool);
+    broadcastPublic("slot_update", {
+      counts,
+      remaining,
+      targets: TARGETS,
+      total,
+      updatedAt: new Date().toISOString(),
+    });
+    broadcastAdmin("stats_updated", {
+      counts,
+      remaining,
+      targets: TARGETS,
+      total,
+      entryCount,
+      entryTickets,
+      action: recentAction,
+      updatedAt: new Date().toISOString(),
+    });
+  } catch (err) {
+    console.error("Failed to broadcast stats", err);
+  }
+}
+
 async function checkInTicket(code, scannedBy = null) {
   const pool = getPool();
   const [audienceRows] = await pool.query(
@@ -294,16 +410,30 @@ async function checkInTicket(code, scannedBy = null) {
     [code]
   );
 
+  const checkedEntry = entryRows[0];
+  const stats = await getEntryStats(pool);
+  const { counts, remaining, total } = await getCountsAndRemaining(pool);
+
+  broadcastAdmin("checkin", {
+    ok: true,
+    status: "checked-in",
+    entry: checkedEntry,
+    entryCount: stats.entryCount,
+    entryTickets: stats.entryTickets,
+    remainingAudience: remaining.audience,
+    timestamp: new Date().toISOString(),
+  });
+
   return {
     ok: true,
     status: "checked-in",
     message: "Check-in Success",
-    entry: entryRows[0],
+    entry: checkedEntry,
   };
 }
 
 app.get("/api/health", (req, res) => {
-  res.json({ ok: true });
+  res.json({ ok: true, timestamp: new Date().toISOString() });
 });
 
 app.get("/api/public/remaining", async (req, res) => {
@@ -313,6 +443,135 @@ app.get("/api/public/remaining", async (req, res) => {
     return res.json({ remaining, counts, targets: TARGETS, total });
   } catch (err) {
     return res.status(500).json({ error: "Failed to load counts" });
+  }
+});
+
+// SSE endpoint for public landing page real-time availability updates
+app.get("/api/realtime/public", async (req, res) => {
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache, no-transform",
+    Connection: "keep-alive",
+    "X-Accel-Buffering": "no",
+  });
+  res.flushHeaders?.();
+
+  publicSseClients.add(res);
+
+  try {
+    const pool = getPool();
+    const { remaining, counts, total } = await getCountsAndRemaining(pool);
+    sendSseMessage(res, "init", {
+      remaining,
+      counts,
+      targets: TARGETS,
+      total,
+      connectedAt: new Date().toISOString(),
+    });
+  } catch (err) {
+    // ignore
+  }
+
+  req.on("close", () => {
+    publicSseClients.delete(res);
+  });
+});
+
+// SSE endpoint for authenticated admin panel real-time stream
+app.get("/api/realtime/admin", async (req, res) => {
+  const token = extractToken(req);
+  if (!token) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+
+  try {
+    jwt.verify(token, JWT_SECRET);
+  } catch (err) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache, no-transform",
+    Connection: "keep-alive",
+    "X-Accel-Buffering": "no",
+  });
+  res.flushHeaders?.();
+
+  adminSseClients.add(res);
+
+  try {
+    const pool = getPool();
+    const { remaining, counts, total } = await getCountsAndRemaining(pool);
+    const { entryCount, entryTickets } = await getEntryStats(pool);
+    const recentActivity = await getRecentActivity(pool, 20);
+
+    sendSseMessage(res, "init", {
+      counts,
+      remaining,
+      targets: TARGETS,
+      total,
+      entryCount,
+      entryTickets,
+      recentActivity,
+      connectedAt: new Date().toISOString(),
+    });
+  } catch (err) {
+    // ignore
+  }
+
+  req.on("close", () => {
+    adminSseClients.delete(res);
+  });
+});
+
+// Fast Ticket Verification endpoint
+app.get("/api/tickets/verify/:code", async (req, res) => {
+  const code = getString(req.params.code);
+  if (!code) {
+    return res.status(400).json({ valid: false, message: "Missing ticket code" });
+  }
+
+  try {
+    const pool = getPool();
+    const [subRows] = await pool.query(
+      "SELECT id, full_name, tickets, contact_number, email, ticket_code, created_at FROM audience_submissions WHERE ticket_code = ? LIMIT 1",
+      [code]
+    );
+
+    if (!subRows.length) {
+      return res.status(404).json({
+        valid: false,
+        message: `Ticket "${code}" not found. Please verify the code.`,
+      });
+    }
+
+    const ticket = subRows[0];
+    const [entryRows] = await pool.query(
+      "SELECT * FROM audience_entries WHERE ticket_code = ? LIMIT 1",
+      [code]
+    );
+
+    const checkedIn = entryRows.length > 0;
+    return res.json({
+      valid: true,
+      checkedIn,
+      ticket: {
+        id: ticket.id,
+        fullName: ticket.full_name,
+        tickets: Number(ticket.tickets) || 1,
+        contactNumber: ticket.contact_number,
+        email: ticket.email,
+        ticketCode: ticket.ticket_code,
+        createdAt: ticket.created_at,
+      },
+      entry: checkedIn ? entryRows[0] : null,
+      message: checkedIn
+        ? `Already Checked In (${ticket.full_name})`
+        : `Valid Ticket (${ticket.full_name} - ${ticket.tickets} Tickets)`,
+    });
+  } catch (err) {
+    return res.status(500).json({ valid: false, message: "Failed to verify ticket" });
   }
 });
 
@@ -504,7 +763,7 @@ app.post("/api/submissions/audience", async (req, res) => {
 
   const pool = getPool();
   const ticketCode = randomUUID();
-  //random tickent code with prefix "GG-" and 8 characters after that from the uuid, removing dashes and taking first 8 characters
+  // random ticket code with prefix "GG-" and 8 characters after that from the uuid, removing dashes and taking first 8 characters
   const formattedTicketCode = `GG-${ticketCode.replace(/-/g, "").substring(0, 8)}`;
   const [result] = await pool.query(
     "INSERT INTO audience_submissions (full_name, tickets, contact_number, email, ticket_code) VALUES (?, ?, ?, ?, ?)",
@@ -518,23 +777,47 @@ app.post("/api/submissions/audience", async (req, res) => {
   );
   const ticket = rows?.[0];
 
+  const ticketResponse = ticket
+    ? {
+        id: ticket.id,
+        fullName: ticket.full_name,
+        tickets: Number(ticket.tickets) || 0,
+        createdAt: ticket.created_at,
+        code: ticket.ticket_code || ticketCode,
+      }
+    : {
+        id: insertId,
+        fullName,
+        tickets,
+        createdAt: new Date().toISOString(),
+        code: formattedTicketCode,
+      };
+
+  // Broadcast real-time slot update to public visitors and admin dashboard
+  void broadcastStatsAndSlotUpdate(pool, {
+    category: "audience",
+    name: fullName,
+    tickets,
+    ticketCode: ticketResponse.code,
+    time: new Date().toISOString(),
+  });
+
+  broadcastAdmin("new_submission", {
+    category: "audience",
+    record: {
+      id: ticketResponse.id,
+      full_name: fullName,
+      tickets,
+      contact_number: contactNumber,
+      email: email || null,
+      ticket_code: ticketResponse.code,
+      created_at: ticketResponse.createdAt,
+    },
+  });
+
   return res.json({
     ok: true,
-    ticket: ticket
-      ? {
-          id: ticket.id,
-          fullName: ticket.full_name,
-          tickets: Number(ticket.tickets) || 0,
-          createdAt: ticket.created_at,
-          code: ticket.ticket_code || ticketCode,
-        }
-      : {
-          id: insertId,
-          fullName,
-          tickets,
-          createdAt: new Date().toISOString(),
-          code: ticketCode,
-        },
+    ticket: ticketResponse,
   });
 });
 
@@ -550,12 +833,34 @@ app.post("/api/submissions/models", async (req, res) => {
   }
 
   const pool = getPool();
-  await pool.query(
+  const [result] = await pool.query(
     "INSERT INTO model_submissions (full_name, age, contact_number, email, outfit_description) VALUES (?, ?, ?, ?, ?)",
     [fullName, age, contactNumber, email || null, outfitDescription || null]
   );
 
-  return res.json({ ok: true });
+  const insertId = result?.insertId;
+
+  void broadcastStatsAndSlotUpdate(pool, {
+    category: "models",
+    name: fullName,
+    tickets: 1,
+    time: new Date().toISOString(),
+  });
+
+  broadcastAdmin("new_submission", {
+    category: "models",
+    record: {
+      id: insertId,
+      full_name: fullName,
+      age,
+      contact_number: contactNumber,
+      email: email || null,
+      outfit_description: outfitDescription || null,
+      created_at: new Date().toISOString(),
+    },
+  });
+
+  return res.json({ ok: true, id: insertId });
 });
 
 app.post("/api/submissions/makeup-artists", async (req, res) => {
@@ -570,12 +875,34 @@ app.post("/api/submissions/makeup-artists", async (req, res) => {
   }
 
   const pool = getPool();
-  await pool.query(
+  const [result] = await pool.query(
     "INSERT INTO makeup_artist_submissions (full_name, experience, contact_number, email, specialization) VALUES (?, ?, ?, ?, ?)",
     [fullName, experience, contactNumber, email || null, specialization || null]
   );
 
-  return res.json({ ok: true });
+  const insertId = result?.insertId;
+
+  void broadcastStatsAndSlotUpdate(pool, {
+    category: "makeup-artists",
+    name: fullName,
+    tickets: 1,
+    time: new Date().toISOString(),
+  });
+
+  broadcastAdmin("new_submission", {
+    category: "makeup-artists",
+    record: {
+      id: insertId,
+      full_name: fullName,
+      experience,
+      contact_number: contactNumber,
+      email: email || null,
+      specialization: specialization || null,
+      created_at: new Date().toISOString(),
+    },
+  });
+
+  return res.json({ ok: true, id: insertId });
 });
 
 app.post("/api/submissions/stall-owners", async (req, res) => {
@@ -590,12 +917,35 @@ app.post("/api/submissions/stall-owners", async (req, res) => {
   }
 
   const pool = getPool();
-  await pool.query(
+  const [result] = await pool.query(
     "INSERT INTO stall_submissions (business_name, owner_name, contact_number, email, business_description) VALUES (?, ?, ?, ?, ?)",
     [businessName, ownerName, contactNumber, email || null, description || null]
   );
 
-  return res.json({ ok: true });
+  const insertId = result?.insertId;
+
+  void broadcastStatsAndSlotUpdate(pool, {
+    category: "stall-owners",
+    name: ownerName,
+    businessName,
+    tickets: 1,
+    time: new Date().toISOString(),
+  });
+
+  broadcastAdmin("new_submission", {
+    category: "stall-owners",
+    record: {
+      id: insertId,
+      business_name: businessName,
+      owner_name: ownerName,
+      contact_number: contactNumber,
+      email: email || null,
+      business_description: description || null,
+      created_at: new Date().toISOString(),
+    },
+  });
+
+  return res.json({ ok: true, id: insertId });
 });
 
 app.post("/api/auth/login", async (req, res) => {
@@ -744,6 +1094,206 @@ app.get("/api/admin/category/:type", requireAuth, async (req, res) => {
     remaining,
     daily,
   });
+});
+
+// Admin Live Activity Feed
+app.get("/api/admin/activity", requireAuth, async (req, res) => {
+  const pool = getPool();
+  const limit = Math.min(Math.max(toInt(req.query.limit) || 30, 1), 100);
+  const rows = await getRecentActivity(pool, limit);
+  return res.json({ rows });
+});
+
+// Update a submission in any category
+app.put("/api/admin/submissions/:type/:id", requireAuth, async (req, res) => {
+  const type = req.params.type;
+  const id = toInt(req.params.id);
+  const category = CATEGORY_MAP[type];
+
+  if (!category || !id) {
+    return res.status(400).json({ error: "Invalid category or ID" });
+  }
+
+  const pool = getPool();
+  const [existing] = await pool.query(
+    `SELECT * FROM ${category.table} WHERE id = ? LIMIT 1`,
+    [id]
+  );
+  if (!existing.length) {
+    return res.status(404).json({ error: "Record not found" });
+  }
+
+  const b = req.body || {};
+
+  if (type === "audience") {
+    const fullName = getString(b.fullName || b.full_name || existing[0].full_name);
+    const contact = getString(b.contactNumber || b.contact_number || existing[0].contact_number);
+    const email = getString(b.email !== undefined ? b.email : existing[0].email);
+    const tickets = toInt(b.tickets) ?? Number(existing[0].tickets);
+
+    await pool.query(
+      "UPDATE audience_submissions SET full_name = ?, contact_number = ?, email = ?, tickets = ? WHERE id = ?",
+      [fullName, contact, email || null, Math.max(1, tickets), id]
+    );
+
+    // Also update matching checked-in audience entry if name or tickets changed
+    if (existing[0].ticket_code) {
+      await pool.query(
+        "UPDATE audience_entries SET full_name = ?, tickets = ?, contact_number = ?, email = ? WHERE ticket_code = ?",
+        [fullName, Math.max(1, tickets), contact, email || null, existing[0].ticket_code]
+      );
+    }
+  } else if (type === "models") {
+    const fullName = getString(b.fullName || b.full_name || existing[0].full_name);
+    const age = toInt(b.age) ?? Number(existing[0].age);
+    const contact = getString(b.contactNumber || b.contact_number || existing[0].contact_number);
+    const email = getString(b.email !== undefined ? b.email : existing[0].email);
+    const outfit = getString(b.outfitDescription || b.outfit_description || existing[0].outfit_description);
+
+    await pool.query(
+      "UPDATE model_submissions SET full_name = ?, age = ?, contact_number = ?, email = ?, outfit_description = ? WHERE id = ?",
+      [fullName, age, contact, email || null, outfit || null, id]
+    );
+  } else if (type === "makeup-artists") {
+    const fullName = getString(b.fullName || b.full_name || existing[0].full_name);
+    const exp = toInt(b.experience) ?? Number(existing[0].experience);
+    const contact = getString(b.contactNumber || b.contact_number || existing[0].contact_number);
+    const email = getString(b.email !== undefined ? b.email : existing[0].email);
+    const spec = getString(b.specialization || existing[0].specialization);
+
+    await pool.query(
+      "UPDATE makeup_artist_submissions SET full_name = ?, experience = ?, contact_number = ?, email = ?, specialization = ? WHERE id = ?",
+      [fullName, exp, contact, email || null, spec || null, id]
+    );
+  } else if (type === "stall-owners") {
+    const bName = getString(b.businessName || b.business_name || existing[0].business_name);
+    const oName = getString(b.ownerName || b.owner_name || existing[0].owner_name);
+    const contact = getString(b.contactNumber || b.contact_number || existing[0].contact_number);
+    const email = getString(b.email !== undefined ? b.email : existing[0].email);
+    const desc = getString(b.description || b.business_description || existing[0].business_description);
+
+    await pool.query(
+      "UPDATE stall_submissions SET business_name = ?, owner_name = ?, contact_number = ?, email = ?, business_description = ? WHERE id = ?",
+      [bName, oName, contact, email || null, desc || null, id]
+    );
+  }
+
+  const [updatedRows] = await pool.query(
+    `SELECT * FROM ${category.table} WHERE id = ? LIMIT 1`,
+    [id]
+  );
+  const updatedRecord = updatedRows[0];
+
+  void broadcastStatsAndSlotUpdate(pool, {
+    category: type,
+    id,
+    action: "updated",
+    time: new Date().toISOString(),
+  });
+
+  broadcastAdmin("submission_updated", {
+    category: type,
+    record: updatedRecord,
+  });
+
+  return res.json({ ok: true, record: updatedRecord });
+});
+
+// Delete a submission from any category
+app.delete("/api/admin/submissions/:type/:id", requireAuth, async (req, res) => {
+  const type = req.params.type;
+  const id = toInt(req.params.id);
+  const category = CATEGORY_MAP[type];
+
+  if (!category || !id) {
+    return res.status(400).json({ error: "Invalid category or ID" });
+  }
+
+  const pool = getPool();
+  const [existing] = await pool.query(
+    `SELECT * FROM ${category.table} WHERE id = ? LIMIT 1`,
+    [id]
+  );
+  if (!existing.length) {
+    return res.status(404).json({ error: "Record not found" });
+  }
+
+  const row = existing[0];
+
+  if (type === "audience" && row.ticket_code) {
+    await pool.query("DELETE FROM audience_entries WHERE ticket_code = ?", [
+      row.ticket_code,
+    ]);
+  }
+
+  await pool.query(`DELETE FROM ${category.table} WHERE id = ?`, [id]);
+
+  void broadcastStatsAndSlotUpdate(pool, {
+    category: type,
+    id,
+    action: "deleted",
+    time: new Date().toISOString(),
+  });
+
+  broadcastAdmin("submission_deleted", {
+    category: type,
+    id,
+  });
+
+  return res.json({ ok: true, deletedId: id });
+});
+
+// Export Category Submissions or Gate Entries to CSV
+app.get("/api/admin/export/:type", requireAuth, async (req, res) => {
+  const type = req.params.type;
+  const pool = getPool();
+
+  let tableName = "";
+  let fileBase = type;
+
+  if (type === "entries") {
+    tableName = "audience_entries";
+    fileBase = "audience-entries";
+  } else if (CATEGORY_MAP[type]) {
+    tableName = CATEGORY_MAP[type].table;
+    fileBase = type;
+  } else {
+    return res.status(400).json({ error: "Invalid export type" });
+  }
+
+  const [rows] = await pool.query(
+    `SELECT * FROM ${tableName} ORDER BY id DESC`
+  );
+
+  if (!rows.length) {
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="glamour-${fileBase}.csv"`
+    );
+    return res.send("No records found\r\n");
+  }
+
+  const headers = Object.keys(rows[0]);
+  const escapeCsv = (val) => {
+    if (val === null || val === undefined) return '""';
+    const str = String(val).replace(/"/g, '""');
+    return `"${str}"`;
+  };
+
+  const csvLines = [
+    headers.map(escapeCsv).join(","),
+    ...rows.map((row) => headers.map((col) => escapeCsv(row[col])).join(",")),
+  ];
+
+  const csvContent = csvLines.join("\r\n");
+
+  res.setHeader("Content-Type", "text/csv; charset=utf-8");
+  res.setHeader(
+    "Content-Disposition",
+    `attachment; filename="glamour-${fileBase}-${new Date().toISOString().slice(0, 10)}.csv"`
+  );
+  return res.send(csvContent);
 });
 
 async function start() {

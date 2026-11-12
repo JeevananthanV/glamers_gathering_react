@@ -1,5 +1,6 @@
 import { useEffect, useState, type FormEvent, type MouseEvent as ReactMouseEvent } from "react";
 import { API_BASE } from "./adminClient";
+import { usePublicRealtime } from "./realtime";
 
 const EVENT_DATE_ISO = "2026-05-02T09:00:00";
 const DEFAULT_REMAINING = {
@@ -413,7 +414,8 @@ async function downloadAudienceTicket(ticket: AudienceTicket) {
 
 export default function GlamourPage() {
   useGlamourInteractions();
-  const [remaining, setRemaining] = useState(DEFAULT_REMAINING);
+  const { remaining, connected } = usePublicRealtime(DEFAULT_REMAINING);
+  const [confirmedTicket, setConfirmedTicket] = useState<AudienceTicket | null>(null);
 
   const openDialog =
     (id: string) =>
@@ -465,31 +467,16 @@ export default function GlamourPage() {
         form.reset();
         if (dialog instanceof HTMLDialogElement) dialog.close();
         showToast(message);
+
         if (endpoint === "audience" && responsePayload?.ticket?.code) {
-          await downloadAudienceTicket(responsePayload.ticket as AudienceTicket);
+          const ticketData = responsePayload.ticket as AudienceTicket;
+          setConfirmedTicket(ticketData);
+          await downloadAudienceTicket(ticketData);
         }
-        void refreshRemaining();
       } catch (err) {
         showToast(err instanceof Error ? err.message : "Submission failed");
       }
     };
-
-  const refreshRemaining = async () => {
-    try {
-      const res = await fetch(`${API_BASE}/api/public/remaining`);
-      if (!res.ok) return;
-      const payload = (await res.json()) as {
-        remaining?: typeof DEFAULT_REMAINING;
-      };
-      if (payload?.remaining) setRemaining(payload.remaining);
-    } catch {
-      // Ignore fetch errors and keep defaults
-    }
-  };
-
-  useEffect(() => {
-    void refreshRemaining();
-  }, []);
 
   return (
     <>
@@ -498,7 +485,11 @@ export default function GlamourPage() {
       <HeroSlider />
       <main id="main-content">
         <AboutSection />
-        <ParticipationSection onOpenDialog={openDialog} remaining={remaining} />
+        <ParticipationSection
+          onOpenDialog={openDialog}
+          remaining={remaining}
+          isLiveSynced={connected}
+        />
         <SponsorsMarquee />
         <ModelsSection />
         <MakeupArtistsSection />
@@ -509,7 +500,118 @@ export default function GlamourPage() {
       <Footer onOpenDialog={openDialog} />
       <ScrollTopButton />
       <Modals onSubmit={handleDialogSubmit} />
+
+      {/* Interactive Official Ticket Confirmation Modal */}
+      {confirmedTicket ? (
+        <ConfirmedTicketModal
+          ticket={confirmedTicket}
+          onClose={() => setConfirmedTicket(null)}
+        />
+      ) : null}
     </>
+  );
+}
+
+function ConfirmedTicketModal({
+  ticket,
+  onClose,
+}: {
+  ticket: AudienceTicket;
+  onClose: () => void;
+}) {
+  const ticketImgUrl = `${API_BASE}/api/tickets/${encodeURIComponent(ticket.code)}.png`;
+
+  return (
+    <div className="gg-modal-backdrop" onClick={onClose}>
+      <div
+        className="gg-modal gg-ticket-modal-card"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="gg-modal-header">
+          <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+            <span style={{ fontSize: "1.5rem" }}>🎉</span>
+            <div>
+              <h3 style={{ margin: 0, color: "#fff" }}>Booking Confirmed!</h3>
+              <small style={{ color: "#f0c26a" }}>
+                Official Entry Pass Generated
+              </small>
+            </div>
+          </div>
+          <button
+            type="button"
+            className="gg-modal-close"
+            onClick={onClose}
+          >
+            ✕
+          </button>
+        </div>
+
+        <div className="gg-modal-body" style={{ textAlign: "center" }}>
+          <p style={{ margin: "0.5rem 0 1rem", color: "rgba(255,255,255,0.85)" }}>
+            Thank you, <strong>{ticket.fullName}</strong>! You have successfully booked{" "}
+            <strong>{ticket.tickets} ticket{ticket.tickets > 1 ? "s" : ""}</strong>.
+          </p>
+
+          <div className="gg-pass-card-container">
+            <img
+              src={ticketImgUrl}
+              alt="Official Entry Pass"
+              className="gg-ticket-pass-image"
+            />
+          </div>
+
+          <div
+            style={{
+              background: "rgba(255,255,255,0.06)",
+              padding: "0.8rem 1rem",
+              borderRadius: "10px",
+              marginTop: "1rem",
+              display: "flex",
+              justifyContent: "space-around",
+              fontSize: "0.9rem",
+            }}
+          >
+            <div>
+              <span style={{ color: "#aaa", display: "block", fontSize: "0.75rem" }}>TICKET CODE</span>
+              <strong style={{ color: "#f0c26a", letterSpacing: "1px" }}>{ticket.code}</strong>
+            </div>
+            <div>
+              <span style={{ color: "#aaa", display: "block", fontSize: "0.75rem" }}>EVENT DATE</span>
+              <strong style={{ color: "#fff" }}>02 May 2026</strong>
+            </div>
+            <div>
+              <span style={{ color: "#aaa", display: "block", fontSize: "0.75rem" }}>VENUE</span>
+              <strong style={{ color: "#fff" }}>Salem, Tamil Nadu</strong>
+            </div>
+          </div>
+        </div>
+
+        <div className="gg-modal-footer" style={{ justifyContent: "center", gap: "0.8rem" }}>
+          <a
+            href={ticketImgUrl}
+            download={`GG-Ticket-${ticket.code}.png`}
+            className="gg-btn-primary"
+            style={{ textDecoration: "none" }}
+          >
+            📥 Download Pass PNG
+          </a>
+          <button
+            type="button"
+            className="gg-btn-secondary"
+            onClick={() => window.print()}
+          >
+            🖨️ Print Pass
+          </button>
+          <button
+            type="button"
+            className="gg-btn-secondary"
+            onClick={onClose}
+          >
+            Done
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -742,9 +844,11 @@ function AboutSection() {
 function ParticipationSection({
   onOpenDialog,
   remaining,
+  isLiveSynced = true,
 }: {
   onOpenDialog: (id: string) => (e: ReactMouseEvent) => void;
   remaining: typeof DEFAULT_REMAINING;
+  isLiveSynced?: boolean;
 }) {
   return (
     <section
@@ -757,6 +861,29 @@ function ParticipationSection({
           <span className="gg-section-label">Join the Experience</span>
           <h2 id="participate-heading">Participation Categories</h2>
           <div className="gg-section-divider" aria-hidden="true"></div>
+          {isLiveSynced ? (
+            <div
+              className="gg-realtime-badge-inline"
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "0.5rem",
+                marginTop: "0.5rem",
+                marginBottom: "1rem",
+                background: "rgba(34, 197, 94, 0.12)",
+                border: "1px solid rgba(34, 197, 94, 0.3)",
+                color: "#86efac",
+                padding: "0.35rem 0.85rem",
+                borderRadius: "20px",
+                fontSize: "0.8rem",
+                fontWeight: 600,
+                letterSpacing: "0.5px",
+              }}
+            >
+              <span className="gg-realtime-dot" />
+              <span>Real-Time Live Availability Synced</span>
+            </div>
+          ) : null}
         </div>
         <div className="gg-cards-grid gg-reveal-stagger">
           <article className="gg-role-card">

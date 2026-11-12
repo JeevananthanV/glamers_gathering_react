@@ -4,9 +4,16 @@ import { clearToken } from "./adminClient";
 type ShellProps = {
   title: string;
   children: React.ReactNode;
+  headerRight?: React.ReactNode;
+  connectionState?: "connected" | "connecting" | "disconnected";
 };
 
-export function AdminShell({ title, children }: ShellProps) {
+export function AdminShell({
+  title,
+  children,
+  headerRight,
+  connectionState = "connected",
+}: ShellProps) {
   const location = useLocation();
   const navigate = useNavigate();
 
@@ -51,7 +58,25 @@ export function AdminShell({ title, children }: ShellProps) {
 
         <main className="gg-admin-content">
           <header className="gg-admin-header">
-            <h1>{title}</h1>
+            <div className="gg-admin-header-main">
+              <h1>{title}</h1>
+              <div
+                className={`gg-realtime-pill gg-realtime-pill--${connectionState}`}
+                title={`Real-Time Stream: ${connectionState}`}
+              >
+                <span className="gg-realtime-dot" />
+                <span>
+                  {connectionState === "connected"
+                    ? "Live Synced"
+                    : connectionState === "connecting"
+                    ? "Connecting..."
+                    : "Offline"}
+                </span>
+              </div>
+            </div>
+            {headerRight ? (
+              <div className="gg-admin-header-actions">{headerRight}</div>
+            ) : null}
           </header>
           {children}
         </main>
