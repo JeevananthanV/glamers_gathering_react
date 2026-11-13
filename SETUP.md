@@ -140,3 +140,4 @@ The output directory will be `frontend/dist/`. For custom domains, ensure `homep
   Verify `DB_USER` and `DB_PASSWORD` in `backend/.env`. By default in XAMPP, `DB_USER=root` and `DB_PASSWORD=` (blank).
 - **Port Conflict on 5000**:
   Change `PORT` in `backend/.env` to another port (e.g., `5002`) and update `VITE_API_URL` accordingly in `frontend/.env`.
+
